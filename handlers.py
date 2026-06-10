@@ -7,7 +7,7 @@ from supabase import create_client
 from telegram import Update
 from telegram.ext import ContextTypes
 from groq import Groq
-from jarvis.dashboard import add_client, add_idea, add_win, add_income, add_expense
+from dashboard import add_client, add_idea, add_win, add_income, add_expense
 
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
