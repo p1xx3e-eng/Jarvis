@@ -48,7 +48,7 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    webhook_url = "https://jarvis-production-bea9.up.railway.app/webhook"
+    webhook_url = "https://worker-production-fa705.up.railway.app/webhook"
     async with app:
         await app.bot.set_webhook(url=webhook_url)
         await app.start()
