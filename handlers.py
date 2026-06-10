@@ -1,4 +1,3 @@
-import anthropic
 import httpx
 import os
 import base64
@@ -9,14 +8,13 @@ from telegram.ext import ContextTypes
 from groq import Groq
 from dashboard import add_client, add_idea, add_win, add_income, add_expense
 
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 OWM_KEY = os.environ.get("OWM_KEY")
 GROQ_KEY = os.environ.get("GROQ_KEY")
 YOUR_ID = 1019675122
 
-ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+groq_client = Groq(api_key=GROQ_KEY)
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def load_history():
@@ -61,37 +59,14 @@ def get_weather():
         print(f"Ошибка погоды: {e}")
         return ""
 
-async def get_search_context(user_input):
-    try:
-        search_response = ai.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            system="Найди актуальную информацию и дай подробный ответ на русском языке. Включи конкретные факты, даты, цифры, названия на русском.",
-            messages=[{"role": "user", "content": user_input}]
-        )
-        result = ""
-        for block in search_response.content:
-            if hasattr(block, "text") and block.text:
-                result += block.text
-        return f"\n\nАктуальная информация из интернета:\n{result}" if result else ""
-    except Exception as e:
-        print(f"Ошибка поиска: {e}")
-        return ""
-
 def parse_command(text):
-    """Парсит команды для дашборда"""
     t = text.strip().lower()
-
     if t.startswith("/клиент ") or t.startswith("/client "):
-        name = text.split(" ", 1)[1].strip()
-        return ("client", name)
+        return ("client", text.split(" ", 1)[1].strip())
     if t.startswith("/идея ") or t.startswith("/idea "):
-        idea = text.split(" ", 1)[1].strip()
-        return ("idea", idea)
+        return ("idea", text.split(" ", 1)[1].strip())
     if t.startswith("/победа ") or t.startswith("/win "):
-        win = text.split(" ", 1)[1].strip()
-        return ("win", win)
+        return ("win", text.split(" ", 1)[1].strip())
     if t.startswith("/доход "):
         parts = text.split(" ", 2)
         if len(parts) >= 3:
@@ -102,8 +77,17 @@ def parse_command(text):
             return ("expense", {"label": parts[1], "amount": parts[2]})
     return None
 
+def groq_chat(messages, system, max_tokens=1024):
+    msgs = [{"role": "system", "content": system}] + messages
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=msgs,
+        max_tokens=max_tokens
+    )
+    return response.choices[0].message.content
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from jarvis.prompts import get_context
+    from prompts import get_context
     if update.effective_user.id != YOUR_ID:
         await update.message.reply_text("Ты не Егор Александрович, забудь сюда дорогу, бродяга")
         return
@@ -111,113 +95,81 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    # Проверяем команды дашборда
     cmd = parse_command(user_input)
     if cmd:
         action, data = cmd
         if action == "client":
             add_client(name=data)
             await update.message.reply_text(f"Клиент {data} добавлен в CRM, сэр")
-            return
         elif action == "idea":
             add_idea(data)
-            await update.message.reply_text(f"Идея сохранена, сэр")
-            return
+            await update.message.reply_text("Идея сохранена, сэр")
         elif action == "win":
             add_win(data)
-            await update.message.reply_text(f"Победа записана, сэр 🔥")
-            return
+            await update.message.reply_text("Победа записана, сэр 🔥")
         elif action == "income":
             try:
                 add_income(data["label"], float(data["amount"]))
                 await update.message.reply_text(f"Доход {data['amount']} ₽ — {data['label']} записан, сэр")
             except:
                 await update.message.reply_text("Формат: /доход Название Сумма")
-            return
         elif action == "expense":
             try:
                 add_expense(data["label"], float(data["amount"]))
                 await update.message.reply_text(f"Расход {data['amount']} ₽ — {data['label']} записан, сэр")
             except:
                 await update.message.reply_text("Формат: /расход Название Сумма")
-            return
+        return
 
     history = load_history()
-    search_context = ""
-
-    if "погода" in user_input.lower() or "прогноз" in user_input.lower():
-        search_context = get_weather()
-    else:
-        search_context = await get_search_context(user_input)
+    search_context = get_weather() if "погода" in user_input.lower() or "прогноз" in user_input.lower() else ""
 
     full_input = user_input + search_context
     save_message("user", user_input)
     history.append({"role": "user", "content": full_input})
 
-    needs_heavy = any(w in user_input.lower() for w in ["напиши пост", "пост", "сценарий", "анализ", "стратегия", "помоги придумать"])
-    model = "claude-sonnet-4-6" if needs_heavy else "claude-haiku-4-5-20251001"
+    answer = groq_chat(history, get_context())
 
-    response = ai.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=get_context(),
-        messages=history
-    )
-
-    answer = response.content[0].text
-
-    fact_response = ai.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=200,
-        messages=[{"role": "user", "content": f"Извлеки важный факт о Егоре ТОЛЬКО если это сделка, деньги, решение по бизнесу, изменение планов, новый клиент. НЕ сохраняй бытовое. Если нет — ответь НЕТ. Если есть — одно предложение.\n\nЕгор: {user_input}\nДжарвис: {answer}"}]
-    )
-
-    fact = fact_response.content[0].text.strip()
-    if fact != "НЕТ" and len(fact) > 5:
-        db.table("facts").insert({"fact": fact}).execute()
+    # Сохраняем факт если есть
+    try:
+        fact = groq_chat(
+            [{"role": "user", "content": f"Извлеки важный факт о Егоре ТОЛЬКО если это сделка, деньги, решение по бизнесу, изменение планов, новый клиент. НЕ сохраняй бытовое. Если нет — ответь НЕТ. Если есть — одно предложение.\n\nЕгор: {user_input}\nДжарвис: {answer}"}],
+            "Ты извлекаешь факты. Отвечай только НЕТ или одним предложением.",
+            max_tokens=100
+        )
+        if fact.strip() != "НЕТ" and len(fact.strip()) > 5:
+            db.table("facts").insert({"fact": fact.strip()}).execute()
+    except:
+        pass
 
     save_message("assistant", answer)
     await update.message.reply_text(answer)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from jarvis.prompts import get_context
     if update.effective_user.id != YOUR_ID:
         return
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_data = bytes(await file.download_as_bytearray())
     image_base64 = base64.b64encode(image_data).decode("utf-8")
     caption = update.message.caption or "Что на этом фото? Опиши подробно."
-
-    response = ai.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=get_context(),
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_base64}},
-            {"type": "text", "text": caption}
-        ]}]
+    # Groq не поддерживает картинки — отвечаем текстом
+    answer = groq_chat(
+        [{"role": "user", "content": f"Пользователь прислал фото с подписью: {caption}. Скажи что ты не можешь видеть картинки пока нет Claude API, но готов помочь если опишет что на фото."}],
+        "Ты Джарвис. Коротко и по делу. Без markdown."
     )
-
-    answer = response.content[0].text
     save_message("assistant", answer)
     await update.message.reply_text(answer)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from jarvis.prompts import get_context
+    from prompts import get_context
     if update.effective_user.id != YOUR_ID:
         return
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     voice_bytes = bytes(await file.download_as_bytearray())
-
-    groq_client = Groq(api_key=GROQ_KEY)
     audio_file = io.BytesIO(voice_bytes)
     audio_file.name = "voice.ogg"
     transcript = groq_client.audio.transcriptions.create(
@@ -226,18 +178,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         language="ru"
     )
     user_input = transcript.text
-
     history = load_history()
     save_message("user", user_input)
     history.append({"role": "user", "content": user_input})
-
-    response = ai.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=512,
-        system=get_context(),
-        messages=history
-    )
-
-    answer = response.content[0].text
+    answer = groq_chat(history, get_context(), max_tokens=512)
     save_message("assistant", answer)
     await update.message.reply_text(answer)
