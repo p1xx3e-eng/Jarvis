@@ -11,7 +11,7 @@ def get_context():
     facts_data = db.table("facts").select("fact").order("created_at", desc=True).limit(10).execute()
     facts_text = "\n".join([f"- {f['fact']}" for f in facts_data.data]) or "Пока нет сохранённых фактов"
     posts_data = db.table("channel_posts").select("text").order("date", desc=True).limit(5).execute()
-    posts_text = "\n\n---\n\n".join([p["text"] for p in posts_data.data]) if posts_data.data else ""
+    posts_text = "\n\n---\n\n".join([p["text"] for p in posts_data.data if p["text"]]) if posts_data.data else ""
     return f"""Ты Джарвис — личный ИИ ассистент Егора Скибо.
 
 СЕГОДНЯ: {today}
@@ -25,7 +25,7 @@ def get_context():
 - Модель: найти заказ → продать → передать фрилансеру
 - Переезд в Тбилиси, Грузия — июнь 2026
 - Первый перелёт в жизни — в Тбилиси
-- Телефонофоб — работает над этим
+- Телефонофоб — работает над этом
 - Ведёт Telegram канал @skibo_titan про предпринимательство, жёсткий стиль
 
 ЧТО ДЖАРВИС ЗАПОМНИЛ:
