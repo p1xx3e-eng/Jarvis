@@ -5,6 +5,7 @@ python-telegram-bot
 httpx==0.27.0
 openai
 groq
+google-genai
 pyowm
 aiohttp
 elevenlabs
