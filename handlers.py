@@ -93,7 +93,7 @@ def gemini_chat(history, system, use_search=True):
 
     config = types.GenerateContentConfig(
         system_instruction=system,
-        max_output_tokens=1024,
+        max_output_tokens=2048,
         tools=[types.Tool(google_search=types.GoogleSearch())] if use_search else None,
     )
     response = gemini.models.generate_content(model=MODEL, contents=contents, config=config)
@@ -152,11 +152,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         answer = gemini_chat(history, get_context(), use_search=True)
+        if not answer or not answer.strip():
+            raise ValueError("Gemini вернул пусто")
     except Exception as e:
         print(f"Gemini ошибка: {e}, фоллбэк на Groq")
         # Фоллбэк на Groq если Gemini не отвечает
         msgs = [{"role": "system", "content": get_context()}] + history
         answer = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, max_tokens=1024).choices[0].message.content
+
+    if not answer or not answer.strip():
+        answer = "Что-то пошло не так с ответом, сэр. Повторите вопрос"
 
     # Сохраняем факт
     try:
@@ -218,10 +223,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         answer = gemini_chat(history, get_context(), use_search=True)
+        if not answer or not answer.strip():
+            raise ValueError("пусто")
     except Exception as e:
         print(f"Gemini ошибка: {e}")
         msgs = [{"role": "system", "content": get_context()}] + history
         answer = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, max_tokens=512).choices[0].message.content
+
+    if not answer or not answer.strip():
+        answer = "Не расслышал толком, сэр. Повторите"
 
     save_message("assistant", answer)
     await update.message.reply_text(answer)
