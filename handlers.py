@@ -6,16 +6,22 @@ from supabase import create_client
 from telegram import Update
 from telegram.ext import ContextTypes
 from groq import Groq
+from google import genai
+from google.genai import types
 from dashboard import add_client, add_idea, add_win, add_income, add_expense
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 OWM_KEY = os.environ.get("OWM_KEY")
 GROQ_KEY = os.environ.get("GROQ_KEY")
+GEMINI_KEY = os.environ.get("GEMINI_KEY")
 YOUR_ID = 1019675122
 
 groq_client = Groq(api_key=GROQ_KEY)
+gemini = genai.Client(api_key=GEMINI_KEY)
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+MODEL = "gemini-2.5-flash"
 
 def load_history():
     result = db.table("memory").select("role, content").order("created_at", desc=True).limit(10).execute()
@@ -77,14 +83,30 @@ def parse_command(text):
             return ("expense", {"label": parts[1], "amount": parts[2]})
     return None
 
-def groq_chat(messages, system, max_tokens=1024):
-    msgs = [{"role": "system", "content": system}] + messages
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=msgs,
-        max_tokens=max_tokens
+def gemini_chat(history, system, use_search=True):
+    """Чат через Gemini с веб-поиском"""
+    # Конвертируем историю в формат Gemini
+    contents = []
+    for msg in history:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=1024,
+        tools=[types.Tool(google_search=types.GoogleSearch())] if use_search else None,
     )
-    return response.choices[0].message.content
+    response = gemini.models.generate_content(model=MODEL, contents=contents, config=config)
+    return response.text
+
+def gemini_simple(prompt, system="", use_search=False):
+    config = types.GenerateContentConfig(
+        system_instruction=system if system else None,
+        max_output_tokens=512,
+        tools=[types.Tool(google_search=types.GoogleSearch())] if use_search else None,
+    )
+    response = gemini.models.generate_content(model=MODEL, contents=prompt, config=config)
+    return response.text
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from prompts import get_context
@@ -122,20 +144,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     history = load_history()
-    search_context = get_weather() if "погода" in user_input.lower() or "прогноз" in user_input.lower() else ""
+    weather_ctx = get_weather() if "погода" in user_input.lower() or "прогноз" in user_input.lower() else ""
 
-    full_input = user_input + search_context
+    full_input = user_input + weather_ctx
     save_message("user", user_input)
     history.append({"role": "user", "content": full_input})
 
-    answer = groq_chat(history, get_context())
-
-    # Сохраняем факт если есть
     try:
-        fact = groq_chat(
-            [{"role": "user", "content": f"Извлеки важный факт о Егоре ТОЛЬКО если это сделка, деньги, решение по бизнесу, изменение планов, новый клиент. НЕ сохраняй бытовое. Если нет — ответь НЕТ. Если есть — одно предложение.\n\nЕгор: {user_input}\nДжарвис: {answer}"}],
-            "Ты извлекаешь факты. Отвечай только НЕТ или одним предложением.",
-            max_tokens=100
+        answer = gemini_chat(history, get_context(), use_search=True)
+    except Exception as e:
+        print(f"Gemini ошибка: {e}, фоллбэк на Groq")
+        # Фоллбэк на Groq если Gemini не отвечает
+        msgs = [{"role": "system", "content": get_context()}] + history
+        answer = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, max_tokens=1024).choices[0].message.content
+
+    # Сохраняем факт
+    try:
+        fact = gemini_simple(
+            f"Извлеки важный факт о Егоре ТОЛЬКО если это сделка, деньги, решение по бизнесу, изменение планов, новый клиент. НЕ сохраняй бытовое. Если нет — ответь НЕТ. Если есть — одно предложение.\n\nЕгор: {user_input}\nДжарвис: {answer}"
         )
         if fact.strip() != "НЕТ" and len(fact.strip()) > 5:
             db.table("facts").insert({"fact": fact.strip()}).execute()
@@ -146,19 +172,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from prompts import get_context
     if update.effective_user.id != YOUR_ID:
         return
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_data = bytes(await file.download_as_bytearray())
-    image_base64 = base64.b64encode(image_data).decode("utf-8")
     caption = update.message.caption or "Что на этом фото? Опиши подробно."
-    # Groq не поддерживает картинки — отвечаем текстом
-    answer = groq_chat(
-        [{"role": "user", "content": f"Пользователь прислал фото с подписью: {caption}. Скажи что ты не можешь видеть картинки пока нет Claude API, но готов помочь если опишет что на фото."}],
-        "Ты Джарвис. Коротко и по делу. Без markdown."
-    )
+
+    try:
+        response = gemini.models.generate_content(
+            model=MODEL,
+            contents=[
+                types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
+                caption,
+            ],
+            config=types.GenerateContentConfig(system_instruction=get_context(), max_output_tokens=1024),
+        )
+        answer = response.text
+    except Exception as e:
+        print(f"Gemini vision ошибка: {e}")
+        answer = "Не могу разобрать фото, сэр. Попробуйте ещё раз"
+
     save_message("assistant", answer)
     await update.message.reply_text(answer)
 
@@ -170,17 +206,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     voice_bytes = bytes(await file.download_as_bytearray())
+    # Whisper через Groq (бесплатно и быстро)
     audio_file = io.BytesIO(voice_bytes)
     audio_file.name = "voice.ogg"
-    transcript = groq_client.audio.transcriptions.create(
-        file=audio_file,
-        model="whisper-large-v3",
-        language="ru"
-    )
+    transcript = groq_client.audio.transcriptions.create(file=audio_file, model="whisper-large-v3", language="ru")
     user_input = transcript.text
+
     history = load_history()
     save_message("user", user_input)
     history.append({"role": "user", "content": user_input})
-    answer = groq_chat(history, get_context(), max_tokens=512)
+
+    try:
+        answer = gemini_chat(history, get_context(), use_search=True)
+    except Exception as e:
+        print(f"Gemini ошибка: {e}")
+        msgs = [{"role": "system", "content": get_context()}] + history
+        answer = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, max_tokens=512).choices[0].message.content
+
     save_message("assistant", answer)
     await update.message.reply_text(answer)
