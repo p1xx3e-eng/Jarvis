@@ -33,6 +33,19 @@ def get_context():
         label = KEY_LABELS.get(row["key"], row["key"])
         context_block += f"\n{label}: {row['value']}"
 
+    # Долги из таблицы finances
+    debts_text = ""
+    try:
+        fin_data = db.table("finances").select("label, amount, type").execute()
+        debts = [f for f in fin_data.data if f.get("type") == "debt"]
+        if debts:
+            total = sum(d.get("amount", 0) for d in debts)
+            debts_text = f"\nДОЛГИ (всего {total:,.0f} ₽ по {len(debts)} займам):"
+            for d in debts:
+                debts_text += f"\n- {d.get('label', '?')}: {d.get('amount', 0):,.0f} ₽"
+    except Exception as e:
+        print(f"Ошибка долгов: {e}")
+
     # Факты которые бот запомнил
     facts_data = db.table("facts").select("fact").order("created_at", desc=True).limit(10).execute()
     facts_text = "\n".join([f"- {f['fact']}" for f in facts_data.data]) or "Пока нет сохранённых фактов"
@@ -50,6 +63,7 @@ def get_context():
 
 ВСЁ О ЕГОРЕ (актуальные данные из системы):
 {context_block}
+{debts_text}
 
 ЧТО ДЖАРВИС ЗАПОМНИЛ:
 {facts_text}
